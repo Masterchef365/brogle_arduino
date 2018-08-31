@@ -10,11 +10,11 @@
 #define ENC_PIN_A 2
 #define ENC_PIN_B 3
 
-#define LIMIT_SWC_PIN 4
+#define LIMIT_SWC_PIN 10
 
 #define MESSAGE_BUFFER_SIZE 32
 
-const unsigned int error_threshold = 10;
+const unsigned int error_threshold = 5;
 
 #define MOTOR_VARS() \
 	VAR(target) \
@@ -35,7 +35,7 @@ typedef enum MotorVarNum {
 } MotorVarNum;
 #undef VAR
 
-#define VAR(NAME) double NAME;
+#define VAR(NAME) double NAME = 0.0;
 	MOTOR_VARS();
 #undef VAR
 
@@ -48,7 +48,7 @@ double pid_in, pid_out;
 PID pid(&pid_in, &pid_out, &target, kp, ki, kd, DIRECT);
 
 void motor_set_pwm(int speed) {
-	if (speed > 0) {
+	if (speed > 0 && abs(speed) <= max_pwm) {
 		analogWrite(PWM_PIN_LEFT, speed);
 		analogWrite(PWM_PIN_RIGHT, 0);
 	} else {
@@ -63,6 +63,7 @@ void setup() {
 	pinMode(PWM_PIN_RIGHT, OUTPUT);
 	pinMode(ENC_PIN_A, INPUT);
 	pinMode(ENC_PIN_B, INPUT);
+	pinMode(LIMIT_SWC_PIN, INPUT_PULLUP);
 
 	pid.SetMode(AUTOMATIC);
 	pid.SetOutputLimits(0, 0);
@@ -75,12 +76,13 @@ void setup() {
 
 void loop() {
 	if (enable > 0.0) {
-		if (digitalRead(LIMIT_SWC_PIN) == HIGH) {
-			is_homing = 0.0;
-			position = 0.0;
-			encoder.write(position);
-		}
-		if (is_homing > 0.0) {
+		if (is_homing == 1.0) {
+			if (digitalRead(LIMIT_SWC_PIN) == LOW) {
+				is_homing = 0.0;
+				position = 0.0;
+				target = position;
+				encoder.write(position);
+			}
 			motor_set_pwm(home_pwm);	
 		} else {
 			pid_in = encoder.read();
@@ -123,6 +125,9 @@ void receiveData(int byteCount) {
 			break;
 		case motor_num_max_pwm:
 			pid.SetOutputLimits(-parsed, parsed);
+			break;
+		case motor_num_position:
+			encoder.write(position);
 			break;
 	}
 
