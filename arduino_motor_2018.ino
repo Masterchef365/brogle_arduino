@@ -2,8 +2,6 @@
 #include <Encoder.h>
 #include <Wire.h>
 
-#define SLAVE_ADDRESS 0x04
-
 #define PWM_PIN_LEFT 5 
 #define PWM_PIN_RIGHT 6 
 
@@ -12,48 +10,65 @@
 
 #define LIMIT_SWC_PIN 10
 
+#define SLAVE_ADDRESS 0x04
+
 #define MESSAGE_BUFFER_SIZE 32
+
+#define MOTOR_KEYS() \
+	KEY(target) \
+	KEY(position) \
+	KEY(kp) \
+	KEY(ki) \
+	KEY(kd) \
+	KEY(mode) \
+	KEY(home) \
+	KEY(home_pwm) \
+	KEY(enable) \
+	KEY(max_pwm) \
+
+#define KEY(NAME) motor_key_##NAME,
+enum MotorKey {
+	motor_key_none,
+	MOTOR_KEYS()
+	motor_key_count
+};
+#undef KEY
+
+union MotorKeyMessage {
+	struct {
+		enum MotorKey id : 7;
+		unsigned char rw : 1;
+	} id_rw;
+	unsigned char num;
+};
+
+#define KEY(NAME) double NAME;
+struct {
+	float dummy;
+	MOTOR_KEYS();
+} float_table;
+float* float_table_ptr = (float*)&float_table;
+#undef VAR
+
+char messsage_buf_out[MESSAGE_BUFFER_SIZE];
+char messsage_buf_in[MESSAGE_BUFFER_SIZE];
 
 const unsigned int error_threshold = 5;
 
-#define MOTOR_VARS() \
-	VAR(target) \
-	VAR(position) \
-	VAR(kp) \
-	VAR(ki) \
-	VAR(kd) \
-	VAR(mode) \
-	VAR(is_homing) \
-	VAR(home_pwm) \
-	VAR(enable) \
-	VAR(max_pwm) \
-
-#define VAR(NAME) motor_num_##NAME,
-typedef enum MotorVarNum {
-	motor_num_none,
-	MOTOR_VARS()
-} MotorVarNum;
-#undef VAR
-
-#define VAR(NAME) double NAME = 0.0;
-	MOTOR_VARS();
-#undef VAR
-
 Encoder encoder(ENC_PIN_A, ENC_PIN_B);
 
-unsigned char latest_i2c_received = motor_num_none;
-unsigned char message_buffer[MESSAGE_BUFFER_SIZE];
-
 double pid_in, pid_out;
-PID pid(&pid_in, &pid_out, &target, kp, ki, kd, DIRECT);
+PID pid(&pid_in, &pid_out, &float_table.target, float_table.kp, float_table.ki, float_table.kd, DIRECT);
 
 void motor_set_pwm(int speed) {
-	if (speed > 0 && abs(speed) <= max_pwm) {
-		analogWrite(PWM_PIN_LEFT, speed);
-		analogWrite(PWM_PIN_RIGHT, 0);
-	} else {
-		analogWrite(PWM_PIN_RIGHT, -speed);
-		analogWrite(PWM_PIN_LEFT, 0);
+	if (abs(speed) <= float_table.max_pwm) {
+		if (speed > 0) {
+			analogWrite(PWM_PIN_LEFT, speed);
+			analogWrite(PWM_PIN_RIGHT, 0);
+		} else {
+			analogWrite(PWM_PIN_RIGHT, -speed);
+			analogWrite(PWM_PIN_LEFT, 0);
+		}
 	}
 }
 
@@ -65,6 +80,8 @@ void setup() {
 	pinMode(ENC_PIN_B, INPUT);
 	pinMode(LIMIT_SWC_PIN, INPUT_PULLUP);
 
+	float_table = {0};
+
 	pid.SetMode(AUTOMATIC);
 	pid.SetOutputLimits(0, 0);
 	pid.SetSampleTime(5);
@@ -75,19 +92,22 @@ void setup() {
 }
 
 void loop() {
-	if (enable > 0.0) {
-		if (is_homing == 1.0) {
+	if (float_table.enable > 0.0) {
+		if (float_table.home > 0.0) {
 			if (digitalRead(LIMIT_SWC_PIN) == LOW) {
-				is_homing = 0.0;
-				position = 0.0;
-				target = position;
-				encoder.write(position);
+				float_table.home = 0.0;
+				float_table.position = 0.0;
+				float_table.target = float_table.position;
+				encoder.write(float_table.position);
 			}
-			motor_set_pwm(home_pwm);	
+			motor_set_pwm(float_table.home_pwm);	
 		} else {
 			pid_in = encoder.read();
-			if (abs(pid_in - target) > error_threshold) {
+			if (abs(pid_in - float_table.target) > error_threshold) {
 				pid.Compute();
+				Serial.print(pid_in);
+				Serial.print(" : ");
+				Serial.println(pid_out);
 				motor_set_pwm(pid_out);
 			} else {
 				motor_set_pwm(0);
@@ -98,42 +118,37 @@ void loop() {
 	}
 }
 
+
 void receiveData(int byteCount) {
-	char* bufcpy = message_buffer;
-	while (Wire.read() != '['); //Sync to type_recieved message
-	unsigned char type = Wire.read();
+	union MotorKeyMessage msg_key;
+	msg_key.num = Wire.read();
+	/*
+	Serial.print(msg_key.id_rw.rw ? "w" : "r");
+	Serial.print(" : ");
+	Serial.print(msg_key.id_rw.id);
+	Serial.print(" | ");
+	*/
 
-	size_t bytes_read = 0;
-	while (
-			Wire.available() && 
-			(*bufcpy++ = Wire.read()) != '\n' && 
-			bytes_read < MESSAGE_BUFFER_SIZE
-			);
-	*bufcpy = '\0';
-	float parsed = atof(message_buffer);
-
-	switch(type) {
-#define VAR(NAME) case motor_num_##NAME: NAME = parsed; break;
-		MOTOR_VARS()
-#undef VAR
-	}
-	switch (type) {
-		case motor_num_kp:
-		case motor_num_ki:
-		case motor_num_kd:
-			pid.SetTunings(kp, ki, kd);
-			break;
-		case motor_num_max_pwm:
-			pid.SetOutputLimits(-parsed, parsed);
-			break;
-		case motor_num_position:
-			encoder.write(position);
-			break;
+	char* message_buffer_cpy = messsage_buf_out;
+	for (int i = 0; i < byteCount; i++) {
+		*message_buffer_cpy++ = Wire.read();
 	}
 
-	latest_i2c_received = type;
+	if (msg_key.id_rw.rw) {
+		float_table_ptr[msg_key.id_rw.id] = atof(messsage_buf_out);
+		if (msg_key.id_rw.id == motor_key_kp || msg_key.id_rw.id == motor_key_ki || msg_key.id_rw.id == motor_key_kd)
+			pid.SetTunings(float_table.kp, float_table.ki, float_table.kd);
+		if (msg_key.id_rw.id == motor_key_max_pwm)
+			pid.SetOutputLimits(-float_table.max_pwm, float_table.max_pwm);
+		if (msg_key.id_rw.id == motor_key_position)
+			encoder.write(float_table.position);
+	} else {
+		sprintf(messsage_buf_out, "%c%f", msg_key.num, float_table_ptr[msg_key.id_rw.id]);
+	}
 }
 
 void sendData() {
-	Wire.write(latest_i2c_received);
+	//Serial.print("Sending: ");
+	//Serial.println(messsage_buf_out);
+	Wire.write(messsage_buf_out, MESSAGE_BUFFER_SIZE);
 }
