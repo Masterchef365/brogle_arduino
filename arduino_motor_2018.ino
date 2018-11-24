@@ -97,7 +97,7 @@ void loop() {
 			if (digitalRead(LIMIT_SWC_PIN) == LOW) {
 				float_table.home = 0.0;
 				float_table.position = 0.0;
-				float_table.target = float_table.position;
+				float_table.target = -1000;//float_table.position;
 				encoder.write(float_table.position);
 			}
 			motor_set_pwm(float_table.home_pwm);	
